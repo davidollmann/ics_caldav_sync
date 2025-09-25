@@ -147,6 +147,39 @@ class ICSToCalDAV:
         logger.debug("Serialized event:\n%s", data)
 
         return data
+    
+    @staticmethod
+    def _add_static_alarms(event: icalendar.Event):
+        """
+        Add two static VALARMs to the event if it's not TRANSPARENT.
+
+        Alarms:
+            * 15 minutes before start (TRIGGER:-PT15M)
+            * At start time (TRIGGER:PT0S)
+
+        Skips adding if:
+            * event has TRANSP:TRANSPARENT, or
+            * any VALARM is already present (user-defined alarms respected).
+        """
+
+        transp = (event.get("TRANSP") or "").upper()
+        if transp == "TRANSPARENT":
+            return
+
+        # If any alarm already exists, skip adding automatic ones
+        for comp in event.subcomponents:
+            if isinstance(comp, icalendar.Alarm):
+                return
+        
+        summary = event.get('SUMMARY') or 'Event reminder'
+        desired_triggers = [datetime.timedelta(minutes=-15), datetime.timedelta()]
+
+        for trigger in desired_triggers:
+            alarm = icalendar.Alarm()
+            alarm.add("ACTION", "DISPLAY")
+            alarm.add("TRIGGER", trigger)
+            alarm.add("DESCRIPTION", summary)
+            event.add_component(alarm)
 
     def synchronise(self):
         """
@@ -177,6 +210,12 @@ class ICSToCalDAV:
                 else:
                     if now_naive > end:
                         continue
+
+            # Add static alarms
+            try:
+                self._add_static_alarms(remote_event)
+            except Exception: 
+                logger.exception("Failed adding alarms to event %s", remote_event.get("uid"))
 
             try:
                 self.local_calendar.save_event(self._wrap(remote_event))
