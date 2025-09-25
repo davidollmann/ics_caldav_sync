@@ -129,23 +129,25 @@ class ICSToCalDAV:
         return local_events_ids
 
     @staticmethod
-    def _wrap(vevent: icalendar.Event) -> bytes:
-        """
-        Since CalDAV expects a VEVENT in a VCALENDAR,
-        we need to wrap each event pulled from a single ICS
-        into its own calendar.
-        This is then serialized, so it's ready to be sent
-        via CalDAV.
+    def _wrap_events(vevents: list[icalendar.Event]) -> bytes:
+        """Wrap one or multiple VEVENTs sharing the same UID into a single VCALENDAR.
+        This allows storing a master event together with its RECURRENCE-ID
+        overrides in one payload. Previously each instance was uploaded
+        separately and later overrides could replace the RRULE master which
+        caused the whole series to disappear in some clients (e.g. Apple).
         """
         calendar = icalendar.Calendar(
             prodid="-//Chihiro Software Ltd//NONSGML Calendar sync//EN"
         )
-        calendar.add_component(vevent)
+        # Master first (if present), then overrides – ensures a clean order.
+        masters = [e for e in vevents if e.get('RRULE') and not e.get('RECURRENCE-ID')]
+        overrides = [e for e in vevents if e not in masters]
+        ordered = masters + overrides if masters else vevents
+        for ev in ordered:
+            calendar.add_component(ev)
         calendar.add_missing_timezones()
-
         data = calendar.to_ical()
-        logger.debug("Serialized event:\n%s", data)
-
+        logger.debug("Serialized %d events (UID=%s)\n%s", len(vevents), vevents[0].get('UID'), data)
         return data
     
     @staticmethod
@@ -195,32 +197,57 @@ class ICSToCalDAV:
         now_aware = datetime.datetime.now(datetime.timezone.utc)
         today = datetime.date.today()
 
-        for remote_event in self.remote_calendar.events:
-            # Skip events in the past, unless requested not to.
+        # Group all VEVENTs by UID so master + overrides are saved together
+        from collections import defaultdict
+        grouped: dict[str, list] = defaultdict(list)
+        for ev in self.remote_calendar.events:
+            uid = ev.get('UID') or ev.get('uid')
+            if not uid:
+                # No UID -> ignore (very rare)
+                continue
+            grouped[uid].append(ev)
+
+        for uid, events in grouped.items():
+            # Past filter: if sync_all is False AND all instances are in the past, skip.
             if not self.sync_all:
-                end = remote_event.end
-                # Compare against date, or naive- or aware- datetime
-                # https://docs.python.org/3/library/datetime.html#determining-if-an-object-is-aware-or-naive
-                if isinstance(end, datetime.date) and not isinstance(end, datetime.datetime):
-                    if today > end:
-                        continue
-                elif end.tzinfo is not None and end.tzinfo.utcoffset(end) is not None:
-                    if now_aware > end:
-                        continue
-                else:
-                    if now_naive > end:
-                        continue
+                all_past = True
+                for ev in events:
+                    end = getattr(ev, 'end', None)
+                    if end is None:
+                        all_past = False
+                        break
+                    if isinstance(end, datetime.date) and not isinstance(end, datetime.datetime):
+                        if today <= end:
+                            all_past = False
+                            break
+                    elif isinstance(end, datetime.datetime):
+                        if end.tzinfo is not None and end.tzinfo.utcoffset(end) is not None:
+                            if now_aware <= end:
+                                all_past = False
+                                break
+                        else:
+                            if now_naive <= end:
+                                all_past = False
+                                break
+                if all_past:
+                    continue
 
-            # Add static alarms
-            try:
-                self._add_static_alarms(remote_event)
-            except Exception: 
-                logger.exception("Failed adding alarms to event %s", remote_event.get("uid"))
+            # Add static alarms per event (idempotent)
+            for ev in events:
+                try:
+                    self._add_static_alarms(ev)
+                except Exception:
+                    logger.exception("Failed adding alarms to event %s", uid)
 
             try:
-                self.local_calendar.save_event(self._wrap(remote_event))
+                payload = self._wrap_events(events)
+                self.local_calendar.save_event(payload)
             except vobject.base.ValidateError:
-                logger.exception("Invalid event was downloaded from the remote. It will be skipped.")
+                logger.exception("Invalid event group (UID=%s) skipped.", uid)
+                continue
+            except Exception:
+                logger.exception("Unexpected error saving group UID=%s", uid)
+                continue
             print("+", end="")
             sys.stdout.flush()
         print()
