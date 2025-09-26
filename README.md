@@ -32,6 +32,8 @@ Set the settings as environment variables:
 * DEBUG (bool, optional): Set to anything to print debugging messages. Please set this when reporting an error.
 * SYNC_ALL (bool, optional): If set, all events in the calendar will be synced. Otherwise, only the ones occuring in the future will be.
 * KEEP_LOCAL (bool, optional): Do not delete events on the CalDAV server that do not exist in the ICS file.
+  
+Events können vom Sync ausgeschlossen werden, indem der Marker `##SYNC:IGNORE##` (Groß-/Kleinschreibung egal) irgendwo in der DESCRIPTION eines Termins steht. Dann wird die komplette Serie (inkl. einzelner Overrides) übersprungen und mit einem `!` im Output markiert.
 
 ## Library usage
 

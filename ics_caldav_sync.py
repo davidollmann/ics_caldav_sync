@@ -86,6 +86,7 @@ class ICSToCalDAV:
 
         self.sync_all = sync_all
         self.keep_local = keep_local
+        self._ignore_marker = "##sync:ignore##"
 
     @staticmethod
     def _get_auth(username: str, password: str, method: str) -> requests.auth.AuthBase:
@@ -231,6 +232,22 @@ class ICSToCalDAV:
                                 break
                 if all_past:
                     continue
+
+            # Fester Marker: Wenn in irgendeiner Beschreibung vorhanden -> gesamte Gruppe skippen
+            skip = False
+            for ev in events:
+                desc = ev.get('DESCRIPTION')
+                if not desc:
+                    continue
+                if self._ignore_marker in str(desc).lower():
+                    logger.debug("Skipping UID=%s due to fixed description marker %s", uid, self._ignore_marker)
+                    skip = True
+                    break
+
+            if skip:
+                print("!", end="")
+                sys.stdout.flush()
+                continue
 
             # Add static alarms per event (idempotent)
             for ev in events:
